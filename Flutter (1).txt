@@ -1,0 +1,307 @@
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+import 'dart:io';
+
+void main() {
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Visor de WebCam',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        brightness: Brightness.light,
+      ),
+      darkTheme: ThemeData(
+        primarySwatch: Colors.blue,
+        brightness: Brightness.dark,
+      ),
+      themeMode: ThemeMode.system,
+      home: const WebcamViewerScreen(),
+    );
+  }
+}
+
+class WebcamViewerScreen extends StatefulWidget {
+  const WebcamViewerScreen({Key? key}) : super(key: key);
+
+  @override
+  _WebcamViewerScreenState createState() => _WebcamViewerScreenState();
+}
+
+class _WebcamViewerScreenState extends State<WebcamViewerScreen> {
+  final TextEditingController _ipController = TextEditingController();
+  final TextEditingController _portController = TextEditingController(
+    text: '5000',
+  );
+  String _currentUrl = '';
+  bool _isConnected = false;
+  bool _isLoading = false;
+  WebViewController? _webViewController;
+  late SharedPreferences _prefs;
+  bool _isFullscreen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedSettings();
+  }
+
+  Future<void> _loadSavedSettings() async {
+    _prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _ipController.text = _prefs.getString('ip_address') ?? '';
+      _portController.text = _prefs.getString('port') ?? '5000';
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    await _prefs.setString('ip_address', _ipController.text);
+    await _prefs.setString('port', _portController.text);
+  }
+
+  Future<bool> _testConnection(String url) async {
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      print('Intentando conectar a: $url');
+      // Verificar el endpoint principal
+      final response = await HttpClient()
+          .getUrl(Uri.parse(url))
+          .timeout(const Duration(seconds: 5))
+          .then((request) => request.close());
+
+      print('Respuesta del servidor: código ${response.statusCode}');
+
+      // También verificar /video_feed si la primera conexión fue exitosa
+      if (response.statusCode == 200) {
+        final videoFeedResponse = await HttpClient()
+            .getUrl(Uri.parse('$url/video_feed'))
+            .timeout(const Duration(seconds: 5))
+            .then((request) => request.close());
+
+        print(
+            'Respuesta de /video_feed: código ${videoFeedResponse.statusCode}');
+      }
+
+      setState(() {
+        _isLoading = false;
+      });
+
+      return response.statusCode == 200;
+    } catch (e) {
+      print('Error de conexión: $e');
+      setState(() {
+        _isLoading = false;
+      });
+      return false;
+    }
+  }
+
+  void _connectToWebcam() async {
+    if (_ipController.text.isEmpty) {
+      _showError('Por favor ingresa una dirección IP');
+      return;
+    }
+
+    // Construir la URL del servidor
+    final url = 'http://${_ipController.text}:${_portController.text}';
+
+    // Verificar si el servidor está respondiendo
+    final isReachable = await _testConnection(url);
+
+    if (!isReachable) {
+      _showError(
+        'No se pudo conectar al servidor. Verifica la IP y el puerto.',
+      );
+      return;
+    }
+
+    setState(() {
+      _currentUrl = url;
+      _isConnected = true;
+    });
+
+    _saveSettings();
+  }
+
+  void _disconnect() {
+    setState(() {
+      _isConnected = false;
+      _currentUrl = '';
+    });
+  }
+
+  void _toggleFullscreen() {
+    setState(() {
+      _isFullscreen = !_isFullscreen;
+    });
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: Colors.red),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: _isFullscreen
+          ? null
+          : AppBar(
+              title: const Text('Visor de WebCam'),
+              actions: [
+                if (_isConnected)
+                  IconButton(
+                    icon: Icon(
+                      _isFullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                    ),
+                    onPressed: _toggleFullscreen,
+                  ),
+              ],
+            ),
+      body: _isConnected ? _buildWebcamView() : _buildConnectionForm(),
+    );
+  }
+
+  Widget _buildWebcamView() {
+    // URL para el feed de video
+    final videoFeedUrl = _currentUrl + '/video_feed';
+
+    // Crear controlador de WebView con configuración actualizada
+    final controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onPageStarted: (String url) {
+            setState(() {
+              _isLoading = true;
+            });
+          },
+          onPageFinished: (String url) {
+            setState(() {
+              _isLoading = false;
+            });
+          },
+          onWebResourceError: (WebResourceError error) {
+            setState(() {
+              _isLoading = false;
+              _showError('Error al cargar el stream: ${error.description}');
+            });
+          },
+        ),
+      )
+      ..loadRequest(Uri.parse(videoFeedUrl));
+
+    return GestureDetector(
+      onTap: _isFullscreen ? _toggleFullscreen : null,
+      child: Stack(
+        children: [
+          WebViewWidget(controller: controller),
+          if (_isLoading)
+            const Center(
+              child: CircularProgressIndicator(),
+            ),
+          if (!_isFullscreen)
+            Positioned(
+              bottom: 16,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.close),
+                  label: const Text('Desconectar'),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                  onPressed: _disconnect,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildConnectionForm() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Conectar a WebCam',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 32),
+          TextField(
+            controller: _ipController,
+            decoration: const InputDecoration(
+              labelText: 'Dirección IP del servidor',
+              hintText: 'Ej: 192.168.1.19',
+              prefixIcon: Icon(Icons.wifi),
+              border: OutlineInputBorder(),
+            ),
+            keyboardType: TextInputType.number,
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _portController,
+            decoration: const InputDecoration(
+              labelText: 'Puerto',
+              hintText: 'Ej: 5000',
+              prefixIcon: Icon(Icons.settings_ethernet),
+              border: OutlineInputBorder(),
+            ),
+            keyboardType: TextInputType.number,
+          ),
+          const SizedBox(height: 32),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.videocam),
+            label: _isLoading
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      ),
+                      SizedBox(width: 8),
+                      Text('Conectando...'),
+                    ],
+                  )
+                : const Text('Conectar'),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+            onPressed: _isLoading ? null : _connectToWebcam,
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ipController.dispose();
+    _portController.dispose();
+    super.dispose();
+  }
+}
+
+-----------------------------------------------------------------------------------------
+
+
